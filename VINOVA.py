@@ -16,14 +16,14 @@ def smooth_line(pts):
 
 # -------- MediaPipe Init ----------
 mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(max_num_hands=1)
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.3, min_tracking_confidence=0.3)
 mp_draw = mp.solutions.drawing_utils
 
 # -------- Streamlit UI -------------
 st.set_page_config(page_title="Air Writing", layout="wide")
 st.title("✍️ Air Writing with Hand Tracking")
 
-# Session State (to persist across reruns)
+# Session State
 if "canvas_list" not in st.session_state:
     st.session_state.canvas_list = [255 * np.ones((480, 640, 3), dtype=np.uint8)]
 if "current_page" not in st.session_state:
@@ -66,6 +66,13 @@ frame_window = st.image([])
 
 cap = cv2.VideoCapture(0)
 
+# ✅ Lower resolution to reduce lag
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)   # Try 320 for more speed
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)  # Try 240 for more speed
+
+frame_skip = 2  # Process every 2nd frame (set 1 = process all frames)
+frame_count = 0
+
 while run:
     ret, frame = cap.read()
     if not ret:
@@ -73,6 +80,13 @@ while run:
         break
 
     frame = cv2.flip(frame, 1)
+    frame_count += 1
+
+    # Skip some frames to improve performance
+    if frame_count % frame_skip != 0:
+        frame_window.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        continue
+
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb)
     h, w, _ = frame.shape

@@ -1,12 +1,15 @@
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TensorFlow warnings
+
 import cv2
 import mediapipe as mp
 import numpy as np
 import streamlit as st
 import easyocr
-import math
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
+from datetime import datetime
 import tempfile
 
 # -------- Helper Functions ----------
@@ -20,48 +23,24 @@ def smooth_line(pts):
         smoothed.append((x, y))
     return smoothed
 
-def recognize_text(img):
-    reader = easyocr.Reader(["en"], gpu=False)
-    results = reader.readtext(img)
-    return " ".join([res[1] for res in results])
-
-def recognize_shape(points):
-    if len(points) < 5:
-        return None
-    cnt = np.array(points).reshape((-1, 1, 2)).astype(np.int32)
-    peri = cv2.arcLength(cnt, True)
-    approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-    if len(approx) == 3:
-        return "Triangle"
-    elif len(approx) == 4:
-        x, y, w, h = cv2.boundingRect(approx)
-        aspect_ratio = w / float(h)
-        return "Square" if 0.9 <= aspect_ratio <= 1.1 else "Rectangle"
-    elif len(approx) > 4:
-        return "Circle"
-    return None
-
-def export_to_pdf(canvas_list):
-    """Save all pages to a multi-page PDF and return the file path"""
-    pdf_path = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf").name
+def save_canvases_to_pdf(canvas_list, filename="airwriting.pdf"):
+    pdf_path = os.path.join(tempfile.gettempdir(), filename)
     c = canvas.Canvas(pdf_path, pagesize=A4)
-    page_w, page_h = A4
+    width, height = A4
 
-    for img in canvas_list:
-        # Convert numpy canvas to ImageReader
-        _, buf = cv2.imencode(".png", img)
-        image = ImageReader(buf.tobytes())
+    for i, img in enumerate(canvas_list):
+        # Convert to RGB and resize to fit A4
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        h, w, _ = img_rgb.shape
+        scale = min(width / w, height / h)
+        new_w, new_h = int(w * scale), int(h * scale)
+        img_resized = cv2.resize(img_rgb, (new_w, new_h))
 
-        # Scale to fit A4
-        iw, ih = img.shape[1], img.shape[0]
-        scale = min(page_w / iw, page_h / ih)
-        new_w, new_h = iw * scale, ih * scale
-
-        # Center on page
-        x = (page_w - new_w) / 2
-        y = (page_h - new_h) / 2
-
-        c.drawImage(image, x, y, width=new_w, height=new_h)
+        # Convert to reportlab ImageReader
+        img_reader = ImageReader(img_resized)
+        x = (width - new_w) // 2
+        y = (height - new_h) // 2
+        c.drawImage(img_reader, x, y, width=new_w, height=new_h)
         c.showPage()
 
     c.save()
@@ -73,10 +52,11 @@ hands = mp_hands.Hands(max_num_hands=1,
                        min_detection_confidence=0.3,
                        min_tracking_confidence=0.3)
 mp_draw = mp.solutions.drawing_utils
+reader = easyocr.Reader(['en'])
 
 # -------- Streamlit UI -------------
 st.set_page_config(page_title="Air Writing", layout="wide")
-st.title("✍️ Air Writing with Hand Tracking + Text, Shape & PDF Export")
+st.title("✍️ Air Writing with Hand Tracking")
 
 # Session State
 if "canvas_list" not in st.session_state:
@@ -84,17 +64,13 @@ if "canvas_list" not in st.session_state:
 if "current_page" not in st.session_state:
     st.session_state.current_page = 0
 if "draw_color" not in st.session_state:
-    st.session_state.draw_color = (0, 0, 255)
+    st.session_state.draw_color = (0, 0, 255)  # Default red
 if "is_drawing" not in st.session_state:
     st.session_state.is_drawing = False
 if "draw_points" not in st.session_state:
     st.session_state.draw_points = []
 if "mode" not in st.session_state:
     st.session_state.mode = "draw"
-if "last_recognized_text" not in st.session_state:
-    st.session_state.last_recognized_text = ""
-if "last_recognized_shape" not in st.session_state:
-    st.session_state.last_recognized_shape = ""
 
 # Sidebar controls
 st.sidebar.header("Controls 🎛️")
@@ -119,22 +95,14 @@ elif color == "Blue":
 else:
     st.session_state.draw_color = (0, 0, 0)
 
-# Recognition buttons
-if st.sidebar.button("🔤 Recognize Text"):
-    canvas_img = st.session_state.canvas_list[st.session_state.current_page]
-    gray = cv2.cvtColor(canvas_img, cv2.COLOR_BGR2GRAY)
-    st.session_state.last_recognized_text = recognize_text(gray)
+mode = st.sidebar.radio("🛠 Mode", ["draw", "circle", "rectangle", "text"])
+st.session_state.mode = mode
 
-if st.sidebar.button("🔺 Recognize Shape"):
-    shape = recognize_shape(st.session_state.draw_points)
-    if shape:
-        st.session_state.last_recognized_shape = shape
-
-# Export PDF
-if st.sidebar.button("📥 Download as PDF"):
-    pdf_file = export_to_pdf(st.session_state.canvas_list)
+if st.sidebar.button("💾 Download PDF"):
+    pdf_file = save_canvases_to_pdf(st.session_state.canvas_list,
+                                    filename=f"airwriting_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
     with open(pdf_file, "rb") as f:
-        st.download_button("⬇️ Click to Save PDF", f, file_name="air_writing.pdf", mime="application/pdf")
+        st.sidebar.download_button("⬇️ Download Canvas PDF", f, file_name="airwriting.pdf")
 
 # Camera Start/Stop
 run = st.checkbox("📷 Start Camera")
@@ -165,16 +133,41 @@ while run:
             st.session_state.is_drawing = True
             st.session_state.draw_points.append((ix, iy))
         else:
+            if st.session_state.is_drawing and st.session_state.draw_points:
+                pts = st.session_state.draw_points
+                if st.session_state.mode == "circle":
+                    (x1, y1), (x2, y2) = pts[0], pts[-1]
+                    radius = int(np.hypot(x2 - x1, y2 - y1))
+                    cv2.circle(st.session_state.canvas_list[st.session_state.current_page],
+                               (x1, y1), radius, st.session_state.draw_color, 3)
+                elif st.session_state.mode == "rectangle":
+                    (x1, y1), (x2, y2) = pts[0], pts[-1]
+                    cv2.rectangle(st.session_state.canvas_list[st.session_state.current_page],
+                                  (x1, y1), (x2, y2), st.session_state.draw_color, 3)
+                elif st.session_state.mode == "text":
+                    x_min = min([p[0] for p in pts])
+                    y_min = min([p[1] for p in pts])
+                    x_max = max([p[0] for p in pts])
+                    y_max = max([p[1] for p in pts])
+                    roi = frame[y_min:y_max, x_min:x_max]
+                    if roi.size > 0:
+                        result = reader.readtext(roi)
+                        if result:
+                            text = result[0][1]
+                            cv2.putText(st.session_state.canvas_list[st.session_state.current_page],
+                                        text, (x_min, y_min - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1, st.session_state.draw_color, 2)
             st.session_state.is_drawing = False
             st.session_state.draw_points.clear()
 
         mp_draw.draw_landmarks(frame, results.multi_hand_landmarks[0], mp_hands.HAND_CONNECTIONS)
 
-    smoothed_points = smooth_line(list(st.session_state.draw_points))
-    for i in range(1, len(smoothed_points)):
-        cv2.line(st.session_state.canvas_list[st.session_state.current_page],
-                 smoothed_points[i - 1], smoothed_points[i],
-                 st.session_state.draw_color, 3)
+    if st.session_state.mode == "draw":
+        smoothed_points = smooth_line(list(st.session_state.draw_points))
+        for i in range(1, len(smoothed_points)):
+            cv2.line(st.session_state.canvas_list[st.session_state.current_page],
+                     smoothed_points[i - 1], smoothed_points[i],
+                     st.session_state.draw_color, 3)
 
     display = frame.copy()
     mask = st.session_state.canvas_list[st.session_state.current_page] < 255
@@ -184,14 +177,6 @@ while run:
                 (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, st.session_state.draw_color, 2)
     cv2.putText(display, f'Page: {st.session_state.current_page + 1}/{len(st.session_state.canvas_list)}',
                 (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (50, 50, 50), 2)
-
-    if st.session_state.last_recognized_text:
-        cv2.putText(display, f'Text: {st.session_state.last_recognized_text}',
-                    (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 100, 0), 2)
-
-    if st.session_state.last_recognized_shape:
-        cv2.putText(display, f'Shape: {st.session_state.last_recognized_shape}',
-                    (10, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 0, 0), 2)
 
     frame_window.image(cv2.cvtColor(display, cv2.COLOR_BGR2RGB))
 

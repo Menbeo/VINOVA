@@ -83,13 +83,13 @@ while run:
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb)
     h, w, _ = frame.shape
-
+    
     if results.multi_hand_landmarks:
         lm = results.multi_hand_landmarks[0].landmark
         ix, iy = int(lm[8].x * w), int(lm[8].y * h)  # Index finger tip
         tx, ty = int(lm[4].x * w), int(lm[4].y * h)  # Thumb tip
         dist = np.hypot(ix - tx, iy - ty)
-
+        
         if dist < 40:
             st.session_state.is_drawing = True
             st.session_state.draw_points.append((ix, iy))
